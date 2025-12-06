@@ -1,0 +1,13 @@
+# Binaries
+violet_native
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Build folders
+dist/
+
+# OS junk
+.DS_Store
+Thumbs.db

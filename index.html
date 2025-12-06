@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Violet - 2D Platformer</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        html, body {
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background: #0a0a0f;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+        
+        #game-container {
+            width: 100%;
+            height: 100%;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            position: relative;
+        }
+        
+        canvas {
+            display: block;
+            image-rendering: pixelated;
+            image-rendering: crisp-edges;
+        }
+        
+        #loading-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            z-index: 100;
+            transition: opacity 0.5s ease-out;
+        }
+        
+        #loading-overlay.hidden {
+            opacity: 0;
+            pointer-events: none;
+        }
+        
+        .game-title {
+            font-size: 72px;
+            font-weight: bold;
+            color: #e94560;
+            text-shadow: 0 0 20px rgba(233, 69, 96, 0.5),
+                         0 4px 8px rgba(0, 0, 0, 0.5);
+            margin-bottom: 40px;
+            letter-spacing: 8px;
+        }
+        
+        .loading-spinner {
+            width: 60px;
+            height: 60px;
+            border: 4px solid rgba(233, 69, 96, 0.2);
+            border-top-color: #e94560;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin-bottom: 20px;
+        }
+        
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+        
+        #loading-text {
+            color: #a0a0b0;
+            font-size: 18px;
+            margin-bottom: 30px;
+        }
+        
+        #progress-bar-container {
+            width: 300px;
+            height: 6px;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 3px;
+            overflow: hidden;
+        }
+        
+        #progress-bar {
+            width: 0%;
+            height: 100%;
+            background: linear-gradient(90deg, #e94560, #ff6b8a);
+            border-radius: 3px;
+            transition: width 0.3s ease;
+        }
+        
+        #click-to-start {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.8);
+            display: none;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            z-index: 200;
+            cursor: pointer;
+        }
+        
+        #click-to-start.visible {
+            display: flex;
+        }
+        
+        .start-text {
+            color: #fff;
+            font-size: 32px;
+            animation: pulse 2s ease-in-out infinite;
+        }
+        
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+        
+        #error-message {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: #e94560;
+            font-size: 18px;
+            text-align: center;
+            padding: 20px;
+            background: rgba(0, 0, 0, 0.8);
+            border-radius: 8px;
+            display: none;
+            z-index: 300;
+        }
+    </style>
+</head>
+<body>
+    <div id="game-container">
+        <div id="loading-overlay">
+            <div class="game-title">VIOLET</div>
+            <div class="loading-spinner"></div>
+            <div id="loading-text">Loading game...</div>
+            <div id="progress-bar-container">
+                <div id="progress-bar"></div>
+            </div>
+        </div>
+        
+        <div id="click-to-start">
+            <div class="start-text">Click to Start</div>
+        </div>
+        
+        <div id="error-message"></div>
+    </div>
+    
+    <script src="wasm_exec.js"></script>
+    <script>
+        // Check WebAssembly support
+        if (!WebAssembly) {
+            showError('Your browser does not support WebAssembly. Please use a modern browser.');
+        }
+        
+        const loadingText = document.getElementById('loading-text');
+        const progressBar = document.getElementById('progress-bar');
+        const loadingOverlay = document.getElementById('loading-overlay');
+        const clickToStart = document.getElementById('click-to-start');
+        const errorMessage = document.getElementById('error-message');
+        
+        let audioContextUnlocked = false;
+        
+        function updateProgress(percent, text) {
+            progressBar.style.width = percent + '%';
+            if (text) loadingText.textContent = text;
+        }
+        
+        function showError(message) {
+            errorMessage.textContent = message;
+            errorMessage.style.display = 'block';
+            loadingOverlay.classList.add('hidden');
+        }
+        
+        function unlockAudioContext() {
+            // Resume any suspended audio contexts after user interaction
+            if (window.AudioContext || window.webkitAudioContext) {
+                const tempContext = new (window.AudioContext || window.webkitAudioContext)();
+                if (tempContext.state === 'suspended') {
+                    tempContext.resume();
+                }
+                tempContext.close();
+            }
+            audioContextUnlocked = true;
+        }
+        
+        async function loadGame() {
+            try {
+                updateProgress(10, 'Initializing WebAssembly...');
+                
+                const go = new Go();
+                
+                updateProgress(20, 'Fetching game binary...');
+                
+                // Fetch with progress tracking
+                const response = await fetch('violet.wasm');
+                if (!response.ok) {
+                    throw new Error(`Failed to fetch WASM: ${response.status} ${response.statusText}`);
+                }
+                
+                const contentLength = response.headers.get('Content-Length');
+                const total = parseInt(contentLength, 10) || 0;
+                const reader = response.body.getReader();
+                let received = 0;
+                const chunks = [];
+                
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+                    
+                    chunks.push(value);
+                    received += value.length;
+                    
+                    if (total > 0) {
+                        const percent = 20 + Math.round((received / total) * 50);
+                        const mb = (received / 1024 / 1024).toFixed(1);
+                        updateProgress(percent, `Downloading... ${mb}MB`);
+                    }
+                }
+                
+                updateProgress(75, 'Compiling WebAssembly...');
+                
+                const wasmBytes = new Uint8Array(received);
+                let offset = 0;
+                for (const chunk of chunks) {
+                    wasmBytes.set(chunk, offset);
+                    offset += chunk.length;
+                }
+                
+                const result = await WebAssembly.instantiate(wasmBytes, go.importObject);
+                
+                updateProgress(90, 'Starting game...');
+                
+                // Show click-to-start for audio unlock on mobile
+                const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+                if (isMobile && !audioContextUnlocked) {
+                    loadingOverlay.classList.add('hidden');
+                    clickToStart.classList.add('visible');
+                    
+                    await new Promise(resolve => {
+                        clickToStart.addEventListener('click', () => {
+                            unlockAudioContext();
+                            clickToStart.classList.remove('visible');
+                            resolve();
+                        }, { once: true });
+                    });
+                }
+                
+                updateProgress(100, 'Launching!');
+                
+                // Small delay for visual feedback
+                await new Promise(resolve => setTimeout(resolve, 300));
+                
+                loadingOverlay.classList.add('hidden');
+                
+                // Run the game
+                go.run(result.instance);
+                
+            } catch (err) {
+                console.error('Failed to load game:', err);
+                showError(`Failed to load game: ${err.message}\n\nMake sure violet.wasm is in the same directory.`);
+            }
+        }
+        
+        // Handle click to unlock audio on desktop too
+        document.addEventListener('click', unlockAudioContext, { once: true });
+        document.addEventListener('keydown', unlockAudioContext, { once: true });
+        document.addEventListener('touchstart', unlockAudioContext, { once: true });
+        
+        // Start loading the game
+        loadGame();
+    </script>
+</body>
+</html>
