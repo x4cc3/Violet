@@ -12,6 +12,21 @@ import (
 	"golang.org/x/image/font/basicfont"
 )
 
+// Portrait cache to avoid reloading images
+var portraitCache = make(map[string]*ebiten.Image)
+
+func loadCachedPortrait(path string) *ebiten.Image {
+	if path == "" {
+		return nil
+	}
+	if cached, ok := portraitCache[path]; ok {
+		return cached
+	}
+	img := loadImage(path)
+	portraitCache[path] = img
+	return img
+}
+
 type DialogueLine struct {
 	Speaker  string
 	Text     string
@@ -82,9 +97,9 @@ func (ds *DialogueSystem) Start(lines []DialogueLine) {
 	ds.AnimationTimer = 0
 	ds.InputCooldown = 10 // Prevent instant skip
 
-	// Load first portrait
+	// Load first portrait (cached)
 	if len(lines) > 0 && lines[0].Portrait != "" {
-		ds.PortraitImage = loadImage(lines[0].Portrait)
+		ds.PortraitImage = loadCachedPortrait(lines[0].Portrait)
 		if ds.PortraitImage == nil {
 			log.Printf("Warning: Failed to load portrait %s", lines[0].Portrait)
 		}
@@ -102,6 +117,13 @@ func (ds *DialogueSystem) Update() {
 		return
 	}
 
+	if ds.InputCooldown > 0 {
+		ds.InputCooldown--
+	}
+
+	currentText := ds.Lines[ds.CurrentLine].Text
+	textLen := len(currentText)
+
 	// Slide-in animation
 	targetY := float32(ScreenHeight) - ds.BoxH - 30
 	if ds.BoxY > targetY {
@@ -112,20 +134,17 @@ func (ds *DialogueSystem) Update() {
 		}
 	}
 
-	if ds.InputCooldown > 0 {
-		ds.InputCooldown--
-	}
-
-	currentText := ds.Lines[ds.CurrentLine].Text
-
 	// Typewriter effect
-	if ds.CharIndex < len(currentText) {
+	if ds.CharIndex < textLen {
 		ds.CharTimer++
 		if ds.CharTimer >= ds.CharsPerTick {
 			ds.CharTimer = 0
 			ds.CharIndex++
+			if ds.CharIndex > textLen {
+				ds.CharIndex = textLen
+			}
 			// Skip spaces
-			for ds.CharIndex < len(currentText) && currentText[ds.CharIndex] == ' ' {
+			for ds.CharIndex < textLen && currentText[ds.CharIndex] == ' ' {
 				ds.CharIndex++
 			}
 		}
@@ -146,9 +165,9 @@ func (ds *DialogueSystem) Update() {
 				ds.CharTimer = 0
 				ds.InputCooldown = 10
 
-				// Load next portrait
+				// Load next portrait (cached)
 				if ds.CurrentLine < len(ds.Lines) && ds.Lines[ds.CurrentLine].Portrait != "" {
-					ds.PortraitImage = loadImage(ds.Lines[ds.CurrentLine].Portrait)
+					ds.PortraitImage = loadCachedPortrait(ds.Lines[ds.CurrentLine].Portrait)
 					if ds.PortraitImage == nil {
 						log.Printf("Warning: Failed to load portrait %s", ds.Lines[ds.CurrentLine].Portrait)
 					}
@@ -202,7 +221,11 @@ func (ds *DialogueSystem) Draw(screen *ebiten.Image) {
 	}
 
 	// Typewriter text
-	displayText := line.Text[:ds.CharIndex]
+	charIndex := ds.CharIndex
+	if charIndex > len(line.Text) {
+		charIndex = len(line.Text)
+	}
+	displayText := line.Text[:charIndex]
 	textWidth := int(ds.BoxW - ds.Padding*2)
 	if ds.PortraitImage != nil {
 		textWidth -= int(ds.PortraitSize + 10)
@@ -216,7 +239,10 @@ func (ds *DialogueSystem) Draw(screen *ebiten.Image) {
 	if actualLines < minLines {
 		actualLines = minLines
 	}
-	ds.BoxH = ds.Padding*2 + float32(actualLines*lineHeight+20) // Extra for speaker
+	boxHeight := ds.Padding*2 + float32(actualLines*lineHeight+20) // Extra for speaker
+	if boxHeight > ds.BoxH {
+		ds.BoxH = boxHeight
+	}
 
 	// Emotion color
 	textColor := ds.TextColor

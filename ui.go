@@ -303,6 +303,9 @@ func (ui *UI) drawKillCounter(screen *ebiten.Image, face font.Face) {
 
 	// Kill count text
 	killText := "Kills: " + intToString(ui.killCount)
+	if ui.killCount < 7 {
+		killText += " / 7"
+	}
 
 	textColor := color.RGBA{255, 255, 255, 255}
 	if ui.killFlashTimer > 0 {

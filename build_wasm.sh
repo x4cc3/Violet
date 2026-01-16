@@ -11,8 +11,8 @@ mkdir -p dist
 mkdir -p dist/assets
 
 # Build WASM binary
-echo "📦 Compiling Go to WASM..."
-GOOS=js GOARCH=wasm go build -o dist/violet.wasm .
+echo "📦 Compiling Go to WASM (optimized)..."
+GOOS=js GOARCH=wasm go build -ldflags="-s -w" -o dist/violet.wasm .
 
 # Copy wasm_exec.js from Go installation
 GOROOT=$(go env GOROOT)

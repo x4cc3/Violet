@@ -7,7 +7,8 @@ import (
 )
 
 type Tilemap struct {
-	TileImages []*ebiten.Image
+	Tileset    *ebiten.Image
+	TileCache  map[int]*ebiten.Image
 	ChestImage *ebiten.Image
 	Grid       [][]int
 	Cols, Rows int
@@ -17,23 +18,15 @@ type Tilemap struct {
 
 func NewTilemap(tileset *ebiten.Image, tileSize int) *Tilemap {
 	tm := &Tilemap{
-		TileSize: tileSize,
-		DrawOpts: &ebiten.DrawImageOptions{},
+		Tileset:   tileset,
+		TileSize:  tileSize,
+		TileCache: make(map[int]*ebiten.Image),
+		DrawOpts:  &ebiten.DrawImageOptions{},
 	}
 
 	bounds := tileset.Bounds()
-	cols := bounds.Dx() / tileSize
-	rows := bounds.Dy() / tileSize
-
-	tm.TileImages = append(tm.TileImages, nil)
-
-	for r := 0; r < rows; r++ {
-		for c := 0; c < cols; c++ {
-			rect := image.Rect(c*tileSize, r*tileSize, (c+1)*tileSize, (r+1)*tileSize)
-			subImg := tileset.SubImage(rect).(*ebiten.Image)
-			tm.TileImages = append(tm.TileImages, subImg)
-		}
-	}
+	tm.Cols = bounds.Dx() / tileSize
+	tm.Rows = bounds.Dy() / tileSize // Tileset dimensions, not world dimensions
 
 	// Chest used in NewTilemap
 	chestSheet := loadImage("assets/images/tiles/chest.png")
@@ -72,6 +65,10 @@ func (tm *Tilemap) Draw(screen *ebiten.Image, camX, camY float64) {
 		endRow = tm.Rows
 	}
 
+	if tm.Grid == nil {
+		return
+	}
+
 	for y := startRow; y < endRow; y++ {
 		for x := startCol; x < endCol; x++ {
 			tileID := tm.Grid[y][x]
@@ -84,10 +81,22 @@ func (tm *Tilemap) Draw(screen *ebiten.Image, camX, camY float64) {
 			if isChest {
 				img = tm.ChestImage
 			} else {
-				if tileID >= len(tm.TileImages) {
-					continue
+				// Lazy load
+				if cached, ok := tm.TileCache[tileID]; ok {
+					img = cached
+				} else {
+					// Calculate position in tileset
+					tilesetCols := tm.Tileset.Bounds().Dx() / tm.TileSize
+					tsX := (tileID % tilesetCols) * tm.TileSize
+					tsY := (tileID / tilesetCols) * tm.TileSize
+
+					// Bounds check
+					if tsX+tm.TileSize <= tm.Tileset.Bounds().Dx() && tsY+tm.TileSize <= tm.Tileset.Bounds().Dy() {
+						rect := image.Rect(tsX, tsY, tsX+tm.TileSize, tsY+tm.TileSize)
+						img = tm.Tileset.SubImage(rect).(*ebiten.Image)
+						tm.TileCache[tileID] = img
+					}
 				}
-				img = tm.TileImages[tileID]
 			}
 			if img == nil {
 				continue
@@ -115,8 +124,8 @@ func (tm *Tilemap) IsSolid(tileID int) bool {
 		return false
 	}
 
-	// Background tiles (logs, leaves, chests)
-	if tileID == 220 || tileID == 296 || tileID == ID_Chest {
+	// Non-solid tiles: air, logs, leaves, chests, water, lava
+	if tileID == 220 || tileID == 296 || tileID == ID_Chest || tileID == ID_Water || tileID == ID_Lava {
 		return false
 	}
 

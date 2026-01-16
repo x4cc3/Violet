@@ -6,12 +6,13 @@ import (
 	"io"
 	"io/fs"
 	"log"
-	"math/rand"
 	"net/http"
 	"os"
 
+	"fmt"
 	_ "image/jpeg" // Register JPEG decoder
 	_ "image/png"  // Register PNG decoder
+	"runtime"
 
 	"github.com/hajimehoshi/ebiten/v2"
 	"github.com/hajimehoshi/ebiten/v2/audio"
@@ -90,19 +91,23 @@ func fetchAudioData(path string) ([]byte, error) {
 		}
 	}
 
-	resp, err := http.Get(path)
-	if err != nil {
-		// HTTP failed, try reading from file system (native build)
-		return os.ReadFile(path)
-	}
-	defer resp.Body.Close()
+	if runtime.GOOS == "js" {
+		// WASM: Try HTTP if embedded failed
+		resp, err := http.Get(path)
+		if err != nil {
+			return nil, err
+		}
+		defer resp.Body.Close()
 
-	if resp.StatusCode != 200 {
-		// HTTP request failed, try file system
-		return os.ReadFile(path)
+		if resp.StatusCode != 200 {
+			return nil, fmt.Errorf("HTTP status %d", resp.StatusCode)
+		}
+
+		return io.ReadAll(resp.Body)
 	}
 
-	return io.ReadAll(resp.Body)
+	// Native: Read from filesystem
+	return os.ReadFile(path)
 }
 
 func loadAudio(audioContext *audio.Context, path string) *audio.Player {
@@ -118,7 +123,18 @@ func loadAudio(audioContext *audio.Context, path string) *audio.Player {
 		return nil
 	}
 
-	player, err := audioContext.NewPlayer(stream)
+	var source io.ReadSeeker = stream
+	if runtime.GOOS == "js" {
+		// Pre-decode into RAM to avoid real-time decoding lag in WASM
+		decoded, err := io.ReadAll(stream)
+		if err == nil {
+			source = bytes.NewReader(decoded)
+		} else {
+			log.Printf("Warning: Failed to pre-decode %s: %v", path, err)
+		}
+	}
+
+	player, err := audioContext.NewPlayer(source)
 	if err != nil {
 		log.Printf("Warning: Failed to create player for %s: %v", path, err)
 		return nil
@@ -140,8 +156,22 @@ func loadLoopingAudio(audioContext *audio.Context, path string) *audio.Player {
 		return nil
 	}
 
+	var source io.ReadSeeker = stream
+	length := stream.Length()
+
+	if runtime.GOOS == "js" {
+		// Pre-decode into RAM to avoid real-time decoding lag in WASM
+		decoded, err := io.ReadAll(stream)
+		if err == nil {
+			source = bytes.NewReader(decoded)
+			length = int64(len(decoded))
+		} else {
+			log.Printf("Warning: Failed to pre-decode %s: %v", path, err)
+		}
+	}
+
 	// Create an infinite loop
-	loop := audio.NewInfiniteLoop(stream, stream.Length())
+	loop := audio.NewInfiniteLoop(source, length)
 
 	player, err := audioContext.NewPlayer(loop)
 	if err != nil {
@@ -192,7 +222,7 @@ func NewGame() *Game {
 	}
 
 	// Load BG image
-	bgPath := "assets/images/backgrounds/bg.jpg"
+	bgPath := "assets/images/backgrounds/bg.png"
 	var err error
 	g.bgImage, _, err = ebitenutil.NewImageFromFile(bgPath)
 	if err != nil {
@@ -226,7 +256,9 @@ func NewGame() *Game {
 		player := loadLoopingAudio(audioContext, soundBase+"Background.mp3")
 		if player != nil {
 			player.SetVolume(0.3)
+			g.soundMutex.Lock()
 			g.sounds["background"] = player
+			g.soundMutex.Unlock()
 			log.Println("Background music loaded successfully")
 		}
 	}()
@@ -236,7 +268,9 @@ func NewGame() *Game {
 		player := loadLoopingAudio(audioContext, soundBase+"running.mp3")
 		if player != nil {
 			player.SetVolume(0.5)
+			g.soundMutex.Lock()
 			g.sounds["running"] = player
+			g.soundMutex.Unlock()
 			log.Println("Running sound loaded successfully")
 		}
 	}()
@@ -245,7 +279,9 @@ func NewGame() *Game {
 	go func() {
 		player := loadAudio(audioContext, soundBase+"attack.mp3")
 		if player != nil {
+			g.soundMutex.Lock()
 			g.sounds["attack"] = player
+			g.soundMutex.Unlock()
 			log.Println("Attack sound loaded successfully")
 		}
 	}()
@@ -254,7 +290,9 @@ func NewGame() *Game {
 	go func() {
 		player := loadAudio(audioContext, soundBase+"chest.mp3")
 		if player != nil {
+			g.soundMutex.Lock()
 			g.sounds["chest"] = player
+			g.soundMutex.Unlock()
 			log.Println("Chest sound loaded successfully")
 		}
 	}()
@@ -264,7 +302,9 @@ func NewGame() *Game {
 		player := loadAudio(audioContext, soundBase+"slime_monster_move.mp3")
 		if player != nil {
 			player.SetVolume(0.4)
+			g.soundMutex.Lock()
 			g.sounds["slime"] = player
+			g.soundMutex.Unlock()
 			log.Println("Slime sound loaded successfully")
 		}
 	}()
@@ -273,20 +313,16 @@ func NewGame() *Game {
 	g.PlayerMaxHealth = 100
 	g.PlayerHealth = 100
 
-	// Spawn monsters
-	mapWidth := g.tilemap.Cols * 16
-	for i := 0; i < 5; i++ { // Reduced for profiling
-		spawnX := 200 + rand.Intn(mapWidth-400) // Adjusted for smaller map
+	// Spawn 7 slimes in mountain chamber: 3 green, 2 blue, 2 red
+	chamberCenterX := MountainChamberX
+	chamberY := MountainChamberY
+	slimeVariants := []int{SlimeGreen, SlimeGreen, SlimeGreen, SlimeBlue, SlimeBlue, SlimeRed, SlimeRed}
 
-		r := rand.Float64()
-		variant := SlimeGreen
-		if r < 0.2 {
-			variant = SlimeRed
-		} else if r < 0.5 {
-			variant = SlimeBlue
-		}
-
-		g.monsters = append(g.monsters, NewSlime(float64(spawnX), 0, variant))
+	for i, variant := range slimeVariants {
+		// Spread slimes across the chamber (40 tiles = 640 pixels wide)
+		offsetX := float64((i - 3) * 80) // Spread from -240 to +240
+		spawnX := chamberCenterX + offsetX
+		g.monsters = append(g.monsters, NewSlime(spawnX, chamberY, variant))
 	}
 
 	log.Println("Game initialized successfully!")

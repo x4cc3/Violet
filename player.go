@@ -8,7 +8,7 @@ import (
 // Physics
 const (
 	Gravity       = 0.5
-	JumpStrength  = -11.0
+	JumpStrength  = -15.0
 	MaxFallSpeed  = 14.0
 	PlayerHitboxW = 20
 	PlayerHitboxH = 64
@@ -21,8 +21,8 @@ const (
 	MaxSpeedX      = 6.0
 
 	// Jump
-	JumpCutMultiplier = 0.5
-	FallGravityMult   = 1.6
+	JumpCutMultiplier = 1.0
+	FallGravityMult   = 1.4
 	CoyoteFrames      = 6
 	JumpBufferFrames  = 8
 )
@@ -295,19 +295,47 @@ func (g *Game) handleCollisionsX(vx float64) {
 }
 
 func (g *Game) handleCollisionsY() {
-	left := int((g.x - PlayerHitboxW/2) / float64(g.tilemap.TileSize))
-	right := int((g.x + PlayerHitboxW/2) / float64(g.tilemap.TileSize))
-
 	g.isGrounded = false
+	tileSize := float64(g.tilemap.TileSize)
+	hitboxW := float64(PlayerHitboxW)
+	hitboxH := float64(PlayerHitboxH)
 
-	// Ground snap
-	for offset := 0; offset <= 5; offset++ {
-		checkY := int((g.y + float64(offset)) / float64(g.tilemap.TileSize))
-		if g.tilemap.IsSolid(g.tilemap.GetTile(left, checkY)) || g.tilemap.IsSolid(g.tilemap.GetTile(right, checkY)) {
-			g.y = float64(checkY) * float64(g.tilemap.TileSize)
+	// Left and right edges of the player
+	// Use a small epsilon to avoid colliding with neighbors when exactly on the edge
+	left := int((g.x - hitboxW/2 + 1) / tileSize)
+	right := int((g.x + hitboxW/2 - 1) / tileSize)
+
+	if g.vy < 0 {
+		// Moving up - Check ceiling
+		topY := g.y - hitboxH
+		top := int(topY / tileSize)
+
+		if g.tilemap.IsSolid(g.tilemap.GetTile(left, top)) || g.tilemap.IsSolid(g.tilemap.GetTile(right, top)) {
+			// Check if we are really moving into it (topY is inside the tile)
+			// Snap to bottom of the ceiling tile
+			g.y = float64(top+1)*tileSize + hitboxH
+			g.vy = 0
+		}
+	} else {
+		// Moving down - Check floor
+		// We use g.y because g.y is the bottom of the player
+		bottom := int(g.y / tileSize)
+
+		if g.tilemap.IsSolid(g.tilemap.GetTile(left, bottom)) || g.tilemap.IsSolid(g.tilemap.GetTile(right, bottom)) {
+			// Landed
+			g.y = float64(bottom) * tileSize
 			g.vy = 0
 			g.isGrounded = true
-			break
+		} else {
+			// Check if we are close to the ground (snap)
+			// This helps with slopes or micro-gaps
+			checkBelow := int((g.y + 2) / tileSize) // Check 2 pixels below
+			if (g.tilemap.IsSolid(g.tilemap.GetTile(left, checkBelow)) || g.tilemap.IsSolid(g.tilemap.GetTile(right, checkBelow))) &&
+				g.y > float64(checkBelow)*tileSize-2 { // Only snap if very close
+				g.y = float64(checkBelow) * tileSize
+				g.vy = 0
+				g.isGrounded = true
+			}
 		}
 	}
 }

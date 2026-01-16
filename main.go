@@ -5,7 +5,9 @@ import (
 	"image"
 	"image/color"
 	"log"
+	"math"
 	"math/rand"
+	"sync"
 	"time"
 
 	"github.com/hajimehoshi/ebiten/v2"
@@ -94,6 +96,16 @@ type Game struct {
 	isRunningPlaying  bool
 	bgMusicPlaying    bool
 	audioEnabled      bool // Toggle with M key
+	soundMutex        sync.RWMutex
+
+	// Quest State
+	questCompleted  bool
+	bigChestSpawned bool
+	bigChestX       float64
+	bigChestY       float64
+	showReward      bool
+	rewardImage     *ebiten.Image
+	rewardAnimTimer int
 }
 
 // Update game logic
@@ -124,6 +136,30 @@ func (g *Game) Update() error {
 		}
 
 	case StatePlaying:
+		if g.showReward {
+			g.rewardAnimTimer++ // Animation timer
+			if inpututil.IsKeyJustPressed(ebiten.KeyEscape) || inpututil.IsKeyJustPressed(ebiten.KeyE) {
+				g.showReward = false
+				g.rewardAnimTimer = 0
+				g.resumeBackgroundMusic()
+
+				// Redirect to mdate in WASM, show dialogue in native
+				if IsEmbedded() {
+					// WASM redirect
+					RedirectToMdate()
+				} else {
+					// Start completion dialogue
+					g.dialogueSystem.Start([]DialogueLine{
+						{Speaker: "Violet", Text: "This ticket... it feels special. Like it could take me somewhere.", Emotion: "excited"},
+						{Speaker: "???", Text: "Accept the ticket, and you shall return to your original world...", Emotion: "neutral"},
+						{Speaker: "???", Text: "But remember, there may be more adventures awaiting you here.", Emotion: "neutral"},
+						{Speaker: "Violet", Text: "I understand. I'll be ready when the time comes.", Emotion: "neutral"},
+					})
+				}
+			}
+			return nil
+		}
+
 		g.updatePlaying()
 
 		// Check for pause
@@ -187,16 +223,70 @@ func (g *Game) updatePlaying() {
 	g.updateMonstersAndCombat()
 	g.updateCamera()
 
+	// Sacred chest spawns in mountain chamber after defeating all 7 slimes
+	if g.ui.killCount >= 7 && !g.questCompleted {
+		g.questCompleted = true
+		// Spawn chest at mountain chamber location
+		g.bigChestX = MountainChamberX
+		g.bigChestY = MountainChamberY
+
+		g.bigChestSpawned = true
+		g.ui.AddNotification("All slimes defeated! A Sacred Chest appeared in the mountain!")
+
+		// Play sound
+		g.soundMutex.RLock()
+		if g.sounds["chest"] != nil {
+			g.sounds["chest"].Rewind()
+			g.sounds["chest"].Play()
+		}
+		g.soundMutex.RUnlock()
+	}
+
 	// Update UI
 	playerTileX := int(g.x / float64(g.tilemap.TileSize))
 	biome := GetBiomeName(GetBiomeAt(playerTileX))
 	g.ui.Update(g.PlayerHealth, g.PlayerMaxHealth, biome)
+
+	// Big Chest Interaction
+	if g.bigChestSpawned && !g.showReward {
+		if inpututil.IsKeyJustPressed(ebiten.KeyE) {
+			dx := float64(g.x) - g.bigChestX
+			dy := float64(g.y) - g.bigChestY
+			dist := math.Sqrt(dx*dx + dy*dy)
+			if dist < 250 { // Generous range
+				g.showReward = true
+				g.pauseBackgroundMusic()
+				// Stop other sounds for the special moment
+				g.soundMutex.RLock()
+				if g.sounds["running"] != nil {
+					g.sounds["running"].Pause()
+				}
+				if g.sounds["slime"] != nil {
+					g.sounds["slime"].Pause()
+				}
+				g.soundMutex.RUnlock()
+				g.isRunningPlaying = false
+				if g.rewardImage == nil {
+					// Load lazily
+					ticket := loadImage("assets/images/ui/movie_ticket.png")
+					if ticket != nil {
+						g.rewardImage = ticket
+					} else {
+						log.Println("ERROR: Failed to load movie_ticket.png")
+					}
+				}
+			}
+		}
+	}
 }
 
 func (g *Game) startBackgroundMusic() {
-	if IsEmbedded() || !g.audioEnabled {
+	if !g.audioEnabled {
 		return
 	}
+	g.soundMutex.RLock()
+	defer g.soundMutex.RUnlock()
+
 	if g.sounds["background"] != nil && !g.bgMusicPlaying {
 		g.sounds["background"].Rewind()
 		g.sounds["background"].Play()
@@ -205,18 +295,24 @@ func (g *Game) startBackgroundMusic() {
 }
 
 func (g *Game) pauseBackgroundMusic() {
+	g.soundMutex.RLock()
+	defer g.soundMutex.RUnlock()
 	if g.sounds["background"] != nil {
 		g.sounds["background"].Pause()
 	}
 }
 
 func (g *Game) resumeBackgroundMusic() {
+	g.soundMutex.RLock()
+	defer g.soundMutex.RUnlock()
 	if g.sounds["background"] != nil && g.bgMusicPlaying {
 		g.sounds["background"].Play()
 	}
 }
 
 func (g *Game) stopBackgroundMusic() {
+	g.soundMutex.RLock()
+	defer g.soundMutex.RUnlock()
 	if g.sounds["background"] != nil {
 		g.sounds["background"].Pause()
 		g.sounds["background"].Rewind()
@@ -225,10 +321,13 @@ func (g *Game) stopBackgroundMusic() {
 }
 
 func (g *Game) updateRunningSound() {
-	if IsEmbedded() || !g.audioEnabled {
+	if !g.audioEnabled {
 		return
 	}
 	isMoving := g.isGrounded && (g.vx > 0.5 || g.vx < -0.5) && !g.isAttacking && !g.isProtecting
+
+	g.soundMutex.RLock()
+	defer g.soundMutex.RUnlock()
 
 	if isMoving && !g.isRunningPlaying {
 		if g.sounds["running"] != nil {
@@ -256,19 +355,18 @@ func (g *Game) restartGame() {
 	// Regenerate world
 	g.tilemap.GenerateTerrariaWorld()
 
-	// Respawn monsters
+	// Reset quest state
+	g.questCompleted = false
+	g.bigChestSpawned = false
+	g.showReward = false
+
+	// Respawn 7 slimes in mountain chamber
 	g.monsters = make([]*Monster, 0)
-	mapWidth := g.tilemap.Cols * 16
-	for i := 0; i < 15; i++ {
-		spawnX := 200 + rand.Intn(mapWidth-400)
-		r := rand.Float64()
-		variant := SlimeGreen
-		if r < 0.2 {
-			variant = SlimeRed
-		} else if r < 0.5 {
-			variant = SlimeBlue
-		}
-		g.monsters = append(g.monsters, NewSlime(float64(spawnX), 0, variant))
+	slimeVariants := []int{SlimeGreen, SlimeGreen, SlimeGreen, SlimeBlue, SlimeBlue, SlimeRed, SlimeRed}
+	for i, variant := range slimeVariants {
+		offsetX := float64((i - 3) * 80)
+		spawnX := MountainChamberX + offsetX
+		g.monsters = append(g.monsters, NewSlime(spawnX, MountainChamberY, variant))
 	}
 
 	// Reset UI
@@ -303,9 +401,11 @@ func (g *Game) handleDebugInputs() {
 		} else {
 			log.Println("Audio DISABLED")
 			g.stopBackgroundMusic()
+			g.soundMutex.RLock()
 			if g.sounds["running"] != nil {
 				g.sounds["running"].Pause()
 			}
+			g.soundMutex.RUnlock()
 			g.isRunningPlaying = false
 		}
 	}
@@ -369,6 +469,38 @@ func (g *Game) breakTilesInRect(rect image.Rectangle) {
 	}
 }
 
+// Find safe ground for big chest near a column
+// Returns world Y (bottom-aligned) and ok
+func (g *Game) findSafeGroundY(col int) (float64, bool) {
+	if g.tilemap == nil || g.tilemap.Grid == nil {
+		return 0, false
+	}
+
+	for tY := 2; tY < g.tilemap.Rows; tY++ {
+		tileID := g.tilemap.GetTile(col, tY)
+		if !g.tilemap.IsSolid(tileID) {
+			continue
+		}
+		// Avoid liquid tiles
+		if tileID == ID_Water || tileID == ID_Lava {
+			continue
+		}
+		// Require two tiles of air above so chest is not buried
+		top1 := g.tilemap.GetTile(col, tY-1)
+		top2 := g.tilemap.GetTile(col, tY-2)
+		if top1 != 0 || top2 != 0 {
+			continue
+		}
+
+		worldY := float64(tY-2) * float64(g.tilemap.TileSize) // chest is 2 tiles high
+		if worldY < 0 {
+			worldY = 0
+		}
+		return worldY, true
+	}
+	return 0, false
+}
+
 // Handle chest interaction
 func (g *Game) checkChestInteraction() {
 	if inpututil.IsKeyJustPressed(ebiten.KeyE) {
@@ -392,10 +524,12 @@ func (g *Game) checkChestInteraction() {
 						g.ui.AddNotification("Opened a chest!")
 					}
 					// Play sound
+					g.soundMutex.RLock()
 					if g.sounds["chest"] != nil {
 						g.sounds["chest"].Rewind()
 						g.sounds["chest"].Play()
 					}
+					g.soundMutex.RUnlock()
 					return
 				}
 			}
@@ -405,14 +539,15 @@ func (g *Game) checkChestInteraction() {
 
 // Update monsters and combat
 func (g *Game) updateMonstersAndCombat() {
-	// Remove dead monsters
-	aliveMonsters := make([]*Monster, 0)
+	// Filter dead monsters in-place (no allocation)
+	writeIdx := 0
 	for _, m := range g.monsters {
 		if m.Health > 0 {
-			aliveMonsters = append(aliveMonsters, m)
+			g.monsters[writeIdx] = m
+			writeIdx++
 		}
 	}
-	g.monsters = aliveMonsters
+	g.monsters = g.monsters[:writeIdx]
 
 	for _, m := range g.monsters {
 		m.Update(g)
@@ -420,10 +555,12 @@ func (g *Game) updateMonstersAndCombat() {
 		// Player attack
 		if g.isAttacking && g.currentFrame == 2 {
 			if !g.attackSoundPlayed {
+				g.soundMutex.RLock()
 				if g.sounds["attack"] != nil {
 					g.sounds["attack"].Rewind()
 					g.sounds["attack"].Play()
 				}
+				g.soundMutex.RUnlock()
 				g.attackSoundPlayed = true
 			}
 			if g.getPlayerAttackHitbox().Overlaps(m.getMonsterBodyHitbox()) {
@@ -465,8 +602,17 @@ func (g *Game) getPlayerAttackHitbox() image.Rectangle {
 		x1 = int(g.x) - 40
 		x2 = int(g.x)
 	}
+	// Validate to prevent inverted hitboxes
+	if x1 > x2 {
+		temp := x1
+		x1 = x2
+		x2 = temp
+	}
 	y1 := int(g.y) - 60
 	y2 := int(g.y)
+	if y1 > y2 {
+		y1 = y2
+	}
 	return image.Rect(x1, y1, x2, y2)
 }
 
@@ -552,11 +698,71 @@ func (g *Game) drawGame(screen *ebiten.Image) {
 	g.drawPlayer(screen)
 
 	// Draw UI
-	g.ui.Draw(screen, g.PlayerHealth, g.PlayerMaxHealth, g.cameraX, g.cameraY)
+	if !g.showReward && (g.dialogueSystem == nil || !g.dialogueSystem.Active) {
+		g.ui.Draw(screen, g.PlayerHealth, g.PlayerMaxHealth, g.cameraX, g.cameraY)
+	}
 
 	// Draw debug
 	if g.showDebug {
 		g.drawDebug(screen)
+	}
+
+	// Draw Big Chest
+	if g.bigChestSpawned {
+		if g.tilemap.ChestImage != nil {
+			op := &ebiten.DrawImageOptions{}
+			op.GeoM.Scale(2, 2) // Big chest
+			op.GeoM.Translate(g.bigChestX-g.cameraX, g.bigChestY-g.cameraY)
+			screen.DrawImage(g.tilemap.ChestImage, op)
+
+			// Hint
+			if !g.showReward {
+				// Blink "E"
+				if (g.frameCounter/30)%2 == 0 {
+					ebitenutil.DebugPrintAt(screen, "E", int(g.bigChestX-g.cameraX)+25, int(g.bigChestY-g.cameraY)-20)
+				}
+			}
+		}
+	}
+
+	// Draw Reward UI
+	if g.showReward && g.rewardImage != nil {
+		// Dim background
+		vector.DrawFilledRect(screen, 0, 0, float32(ScreenWidth), float32(ScreenHeight), color.RGBA{0, 0, 0, 220}, false)
+
+		// Draw Ticket with animation
+		w := g.rewardImage.Bounds().Dx()
+		h := g.rewardImage.Bounds().Dy()
+		scale := 0.5 // Smaller size
+
+		// Floating animation
+		floatOffset := math.Sin(float64(g.rewardAnimTimer)*0.05) * 10
+
+		// Glow effect - draw slightly larger, faded copies behind
+		for i := 3; i > 0; i-- {
+			glowOp := &ebiten.DrawImageOptions{}
+			glowScale := scale + float64(i)*0.02
+			glowOp.GeoM.Scale(glowScale, glowScale)
+			glowOp.GeoM.Translate(
+				float64(ScreenWidth)/2-float64(w)*glowScale/2,
+				float64(ScreenHeight)/2-float64(h)*glowScale/2+floatOffset,
+			)
+			glowOp.ColorM.Scale(1, 1, 1, 0.2)
+			screen.DrawImage(g.rewardImage, glowOp)
+		}
+
+		// Main ticket
+		op := &ebiten.DrawImageOptions{}
+		op.GeoM.Scale(scale, scale)
+		op.GeoM.Translate(
+			float64(ScreenWidth)/2-float64(w)*scale/2,
+			float64(ScreenHeight)/2-float64(h)*scale/2+floatOffset,
+		)
+		screen.DrawImage(g.rewardImage, op)
+
+		// Text
+		msg := "CONGRATULATIONS!\nYou found the Movie Date Ticket!\n\nPress E or ESC to continue..."
+		ebitenutil.DebugPrintAt(screen, msg, ScreenWidth/2-100, ScreenHeight/2+int(float64(h)*scale)/2+40)
 	}
 
 	// Draw dialogue
@@ -574,16 +780,33 @@ func (g *Game) drawPalette(screen *ebiten.Image) {
 
 	cols := 24
 
-	for i, img := range g.tilemap.TileImages {
-		if img == nil {
-			continue
-		}
+	// Draw palette using cache
+	tilesetCols := g.tilemap.Tileset.Bounds().Dx() / g.tilemap.TileSize
+	tilesetRows := g.tilemap.Tileset.Bounds().Dy() / g.tilemap.TileSize
+	totalTiles := tilesetCols * tilesetRows
 
+	for i := 0; i < totalTiles; i++ {
 		c := i % cols
 		r := i / cols
 
 		x := startX + c*(tileSize+padding)
 		y := startY + r*(tileSize+padding)
+
+		// Get image from cache or load it
+		var img *ebiten.Image
+		if cached, ok := g.tilemap.TileCache[i]; ok {
+			img = cached
+		} else {
+			tsX := (i % tilesetCols) * tileSize
+			tsY := (i / tilesetCols) * tileSize
+			rect := image.Rect(tsX, tsY, tsX+tileSize, tsY+tileSize)
+			img = g.tilemap.Tileset.SubImage(rect).(*ebiten.Image)
+			g.tilemap.TileCache[i] = img
+		}
+
+		if img == nil {
+			continue
+		}
 
 		op := &ebiten.DrawImageOptions{}
 		op.GeoM.Translate(float64(x), float64(y))
@@ -601,7 +824,8 @@ func (g *Game) drawBackground(screen *ebiten.Image) {
 		return
 	}
 
-	parallax := 0.5
+	// Slower parallax for space background
+	parallax := 0.2
 	scale := float64(ScreenHeight) / float64(g.bgImage.Bounds().Dy())
 	imgW := float64(g.bgImage.Bounds().Dx()) * scale
 
@@ -671,6 +895,12 @@ func (g *Game) drawPlayer(screen *ebiten.Image) {
 
 	sx := g.currentFrame * g.frameWidth
 	sy := 0
+
+	// Safety check
+	if sx < 0 || sy < 0 || sx+g.frameWidth > g.currentSpriteSheet.Bounds().Dx() || sy+g.frameHeight > g.currentSpriteSheet.Bounds().Dy() {
+		return
+	}
+
 	rect := image.Rect(sx, sy, sx+g.frameWidth, sy+g.frameHeight)
 	sprite := g.currentSpriteSheet.SubImage(rect).(*ebiten.Image)
 

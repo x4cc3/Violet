@@ -3,6 +3,7 @@ package main
 import (
 	"image/color"
 	"math"
+	"strconv"
 
 	"github.com/hajimehoshi/ebiten/v2"
 	"github.com/hajimehoshi/ebiten/v2/inpututil"
@@ -10,6 +11,12 @@ import (
 	"github.com/hajimehoshi/ebiten/v2/vector"
 	"golang.org/x/image/font"
 	"golang.org/x/image/font/basicfont"
+)
+
+// Reusable text buffers to avoid per-frame allocations
+var (
+	scaledTextBuffer *ebiten.Image
+	largeTextBuffer  *ebiten.Image
 )
 
 type GameState int
@@ -141,7 +148,7 @@ type MenuScreen struct {
 func NewMenuScreen() *MenuScreen {
 	return &MenuScreen{
 		selectedOption: 0,
-		options:        []string{"Start Game", "Controls", "Quit"},
+		options:        []string{"Start Game", "Quit"},
 		animTimer:      0,
 	}
 }
@@ -168,9 +175,7 @@ func (ms *MenuScreen) Update() (GameState, bool) {
 		switch ms.selectedOption {
 		case 0: // Start Game
 			return StatePlaying, false
-		case 1: // Controls - just show for now, could add a controls screen
-			return StateMenu, false
-		case 2: // Quit
+		case 1: // Quit
 			return StateMenu, true // Signal to quit
 		}
 	}
@@ -423,24 +428,25 @@ func (ds *DeathScreen) Draw(screen *ebiten.Image) {
 	}
 }
 
-// Draw scaled text
+// Draw scaled text (reuses buffer to avoid allocations)
 func drawScaledText(screen *ebiten.Image, s string, cx, y int, scale float64, face font.Face, clr color.Color) {
 	if scale <= 0 {
 		return
 	}
 
-	// Text dims
-	charWidth := 7   // basicfont character width
-	charHeight := 13 // basicfont character height
+	charWidth := 7
+	charHeight := 13
 	textWidth := len(s) * charWidth
+	requiredW := textWidth + 4
+	requiredH := charHeight + 4
 
-	// Temp image
-	textImg := ebiten.NewImage(textWidth+4, charHeight+4)
+	// Reuse or resize buffer
+	if scaledTextBuffer == nil || scaledTextBuffer.Bounds().Dx() < requiredW || scaledTextBuffer.Bounds().Dy() < requiredH {
+		scaledTextBuffer = ebiten.NewImage(requiredW, requiredH)
+	}
+	scaledTextBuffer.Clear()
+	text.Draw(scaledTextBuffer, s, face, 2, charHeight, clr)
 
-	// Draw text
-	text.Draw(textImg, s, face, 2, charHeight, clr)
-
-	// Scaled dims
 	scaledWidth := float64(textWidth) * scale
 	scaledHeight := float64(charHeight) * scale
 
@@ -449,65 +455,43 @@ func drawScaledText(screen *ebiten.Image, s string, cx, y int, scale float64, fa
 	shadowOp.GeoM.Scale(scale, scale)
 	shadowOp.GeoM.Translate(float64(cx)-scaledWidth/2+3, float64(y)-scaledHeight+3)
 	shadowOp.ColorM.Scale(0, 0, 0, 0.5)
-	shadowOp.Filter = ebiten.FilterLinear // Smooth scaling
-	screen.DrawImage(textImg, shadowOp)
+	shadowOp.Filter = ebiten.FilterLinear
+	screen.DrawImage(scaledTextBuffer, shadowOp)
 
 	// Main text
 	op := &ebiten.DrawImageOptions{}
 	op.GeoM.Scale(scale, scale)
 	op.GeoM.Translate(float64(cx)-scaledWidth/2, float64(y)-scaledHeight)
-	op.Filter = ebiten.FilterLinear // Smooth scaling
-	screen.DrawImage(textImg, op)
+	op.Filter = ebiten.FilterLinear
+	screen.DrawImage(scaledTextBuffer, op)
 }
 
-// Draw large text
+// Draw large text (reuses buffer to avoid allocations)
 func drawLargeText(screen *ebiten.Image, s string, cx, y int, size int, face font.Face, clr color.Color) {
-	// Render then scale
 	charWidth := 7
 	charHeight := 13
 	textWidth := len(s) * charWidth
+	requiredW := textWidth + 4
+	requiredH := charHeight + 4
 
-	// Create buffer
-	buf := ebiten.NewImage(textWidth+4, charHeight+4)
-	text.Draw(buf, s, face, 2, charHeight, clr)
+	// Reuse or resize buffer
+	if largeTextBuffer == nil || largeTextBuffer.Bounds().Dx() < requiredW || largeTextBuffer.Bounds().Dy() < requiredH {
+		largeTextBuffer = ebiten.NewImage(requiredW, requiredH)
+	}
+	largeTextBuffer.Clear()
+	text.Draw(largeTextBuffer, s, face, 2, charHeight, clr)
 
-	// Scale
 	scale := float64(size) / float64(charHeight)
 	scaledWidth := float64(textWidth) * scale
 
-	// Draw with smooth scaling
 	op := &ebiten.DrawImageOptions{}
 	op.GeoM.Scale(scale, scale)
 	op.GeoM.Translate(float64(cx)-scaledWidth/2, float64(y))
-	op.Filter = ebiten.FilterLinear // Smooth scaling
-	screen.DrawImage(buf, op)
+	op.Filter = ebiten.FilterLinear
+	screen.DrawImage(largeTextBuffer, op)
 }
 
-// Int to string
+// Int to string (uses optimized stdlib)
 func intToString(n int) string {
-	// Zero
-	if n == 0 {
-		return "0"
-	}
-
-	negative := n < 0
-	if negative {
-		n = -n
-	}
-
-	digits := make([]byte, 0, 10)
-	for n > 0 {
-		digits = append(digits, byte('0'+n%10))
-		n /= 10
-	}
-
-	// Reverse
-	for i, j := 0, len(digits)-1; i < j; i, j = i+1, j-1 {
-		digits[i], digits[j] = digits[j], digits[i]
-	}
-
-	if negative {
-		return "-" + string(digits)
-	}
-	return string(digits)
+	return strconv.Itoa(n)
 }

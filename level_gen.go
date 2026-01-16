@@ -9,30 +9,30 @@ import (
 
 // Tile IDs
 const (
-	ID_Grass   = 552
-	ID_Dirt    = 575
+	ID_Grass   = 92
+	ID_Dirt    = 193
 	ID_Stone   = 578
 	ID_Log     = 220
 	ID_Leaves  = 296
-	ID_Planks  = 244
-	ID_Furnace = 597
-	ID_OreGold = 133
-	ID_OreIron = 135
-	ID_OreCoal = 128
+	ID_Planks  = 247
+	ID_Furnace = 596
+	ID_OreGold = 132
+	ID_OreIron = 134
+	ID_OreCoal = 127
 
-	ID_Lava  = 294
-	ID_Sand  = 576
-	ID_Water = 295
-	ID_Chest = 600
+	ID_Lava     = 162
+	ID_Sand     = 582
+	ID_Water    = 142 // placeholder; water generation removed
+	ID_Chest    = 600
+	ID_BigChest = 602 // Sacred chest for quest reward
 
-	// New decorative tiles
-	ID_Mushroom   = 297 // Assuming these exist in tileset
-	ID_Crystal    = 298
-	ID_Flower     = 299
-	ID_SnowGrass  = 553
-	ID_MossyStone = 579
-	ID_DarkStone  = 580
-	ID_SkyGrass   = 554
+	ID_Mushroom   = 191
+	ID_Crystal    = 200
+	ID_Flower     = 291
+	ID_SnowGrass  = 570
+	ID_MossyStone = 31
+	ID_DarkStone  = 5
+	ID_SkyGrass   = 558
 )
 
 // Biomes
@@ -123,7 +123,7 @@ func (tm *Tilemap) GenerateTerrariaWorld() {
 		height := generateBiomeHeight(perlinGen, x, biome)
 
 		// Smooth transitions
-		transitionWidth := 30
+		transitionWidth := 50 // Wider transitions for smoother biome blending
 		if x > transitionWidth && biomes[x] != biomes[x-transitionWidth] {
 			// We're in a transition zone - blend heights
 			prevBiome := biomes[x-transitionWidth]
@@ -141,6 +141,22 @@ func (tm *Tilemap) GenerateTerrariaWorld() {
 			height = prevHeight*(1-blendFactor) + height*blendFactor
 		}
 
+		// Enhanced neighbor smoothing for gentler terrain
+		if x > 2 {
+			// Weighted average with more neighbors
+			height = (height*0.4 + float64(surfaceHeight[x-1])*0.3 + float64(surfaceHeight[x-2])*0.2 + float64(surfaceHeight[x-3])*0.1)
+			// Strict slope limit - max 2 tiles difference
+			prevH := float64(surfaceHeight[x-1])
+			if height-prevH > 2 {
+				height = prevH + 2
+			}
+			if prevH-height > 2 {
+				height = prevH - 2
+			}
+		} else if x > 0 {
+			height = (height + float64(surfaceHeight[x-1])) / 2
+		}
+
 		// Clamp
 		if height < 15 {
 			height = 15
@@ -150,6 +166,29 @@ func (tm *Tilemap) GenerateTerrariaWorld() {
 		}
 
 		surfaceHeight[x] = int(height)
+	}
+
+	// Spawn zone flattening around the start area
+	spawnStart := 80
+	spawnEnd := 140
+	if spawnEnd >= tm.Cols {
+		spawnEnd = tm.Cols - 1
+	}
+	if spawnStart < 2 {
+		spawnStart = 2
+	}
+	// Flatten to mean height in window to ensure safe start
+	sum := 0
+	count := 0
+	for x := spawnStart; x <= spawnEnd; x++ {
+		sum += surfaceHeight[x]
+		count++
+	}
+	if count > 0 {
+		avg := sum / count
+		for x := spawnStart; x <= spawnEnd; x++ {
+			surfaceHeight[x] = avg
+		}
 	}
 
 	// Fill blocks
@@ -213,62 +252,97 @@ func (tm *Tilemap) GenerateTerrariaWorld() {
 					tm.Grid[y][x] = ID_Stone
 				}
 
-				// Ores
-				depthFactor := float64(depth) / float64(tm.Rows-yGeo)
-				if rand.Float64() < 0.015*(1+depthFactor) {
-					generateOreVein(tm, x, y, ID_OreCoal)
-				} else if rand.Float64() < 0.008*(1+depthFactor*0.5) && depth > 30 {
-					generateOreVein(tm, x, y, ID_OreIron)
-				} else if rand.Float64() < 0.003*(1+depthFactor) && depth > 60 {
-					generateOreVein(tm, x, y, ID_OreGold)
+				// Ores (single roll to prevent dense overlaps), with biome/depth bias
+				if depth > 2 {
+					r := rand.Float64()
+					depthFactor := float64(depth) / float64(tm.Rows-yGeo)
+					// Base chances
+					coalChance := 0.010 * (1 + depthFactor)
+					ironChance := 0.006 * (1 + depthFactor*0.5)
+					goldChance := 0.0025 * (1 + depthFactor)
+
+					// Biome tweaks
+					if biomes[x] == BiomeMountains {
+						ironChance *= 1.4
+					}
+					if biomes[x] == BiomeDesert {
+						goldChance *= 1.25
+					}
+					if biomes[x] == BiomeForest || biomes[x] == BiomePlains {
+						coalChance *= 1.15
+					}
+
+					if depth > 60 && r < goldChance {
+						generateOreVein(tm, x, y, ID_OreGold)
+					} else if depth > 30 && r < ironChance {
+						generateOreVein(tm, x, y, ID_OreIron)
+					} else if r < coalChance {
+						generateOreVein(tm, x, y, ID_OreCoal)
+					}
 				}
+
 			}
 		}
 	}
 
-	// Lava and water
+	// Lava band at bottom (keep a buffer above to avoid one-tile ceilings)
 	for y := tm.Rows - 8; y < tm.Rows; y++ {
 		for x := 0; x < tm.Cols; x++ {
 			tm.Grid[y][x] = ID_Lava
 		}
 	}
 
-	// Swamp water
-	for x := 0; x < tm.Cols; x++ {
-		if biomes[x] == BiomeSwamp {
-			waterLevel := surfaceHeight[x] + 2
-			for y := waterLevel; y < waterLevel+5 && y < tm.Rows-10; y++ {
-				if tm.Grid[y][x] == 0 || tm.Grid[y][x] == ID_Dirt {
-					tm.Grid[y][x] = ID_Water
-				}
+	// Water disabled: no swamp fill
+
+	// Enhanced cave system with more variety
+	numCaves := tm.Cols / 12 // More caves
+	if IsEmbedded() {
+		numCaves = tm.Cols / 20
+	}
+
+	cavePositions := make([][2]int, 0) // Track cave positions for connections
+
+	for i := 0; i < numCaves; i++ {
+		cx := rand.Intn(tm.Cols)
+		// Varied depth - some shallow, some deep
+		minDepth := surfaceHeight[cx] + 15
+		maxDepth := tm.Rows - 15
+		if maxDepth <= minDepth {
+			continue
+		}
+
+		// Bias towards mid-depth for larger caves
+		depthRange := maxDepth - minDepth
+		cy := minDepth + rand.Intn(depthRange)
+
+		// More variety in cave types
+		r := rand.Float64()
+		if r < 0.3 {
+			generateCavern(tm, cx, cy)
+		} else if r < 0.5 {
+			// Large cavern
+			generateCavern(tm, cx, cy)
+			generateCavern(tm, cx+rand.Intn(10)-5, cy+rand.Intn(10)-5)
+		} else {
+			generateSmootherCave(tm, cx, cy)
+		}
+
+		cavePositions = append(cavePositions, [2]int{cx, cy})
+	}
+
+	// Connect some nearby caves with tunnels
+	for i := 0; i < len(cavePositions)-1; i++ {
+		if rand.Float64() < 0.3 {
+			c1, c2 := cavePositions[i], cavePositions[i+1]
+			dist := math.Sqrt(float64((c1[0]-c2[0])*(c1[0]-c2[0]) + (c1[1]-c2[1])*(c1[1]-c2[1])))
+			if dist < 50 {
+				// Create connecting tunnel
+				generateTunnel(tm, c1[0], c1[1], c2[0], c2[1])
 			}
 		}
 	}
 
-	numCaves := tm.Cols / 15
-	if IsEmbedded() {
-		numCaves = tm.Cols / 25
-	}
-	for i := 0; i < numCaves; i++ {
-		cx := rand.Intn(tm.Cols)
-		// Fix WASM panic: ensure positive range
-		minDepth := surfaceHeight[cx] + 20
-		maxDepth := tm.Rows - 20
-		if maxDepth <= minDepth {
-			continue // Skip if no space for cave
-		}
-		cy := minDepth + rand.Intn(maxDepth-minDepth)
-
-		if rand.Float64() < 0.25 {
-			generateCavern(tm, cx, cy)
-		} else if rand.Float64() < 0.1 {
-			generateUndergroundLake(tm, cx, cy)
-		} else {
-			generateSmootherCave(tm, cx, cy)
-		}
-	}
-
-	// Sky islands
+	// Sky islands with more variety
 	numSkyIslands := 3 + rand.Intn(3)
 	for i := 0; i < numSkyIslands; i++ {
 		ix := 50 + rand.Intn(tm.Cols-100)
@@ -276,7 +350,8 @@ func (tm *Tilemap) GenerateTerrariaWorld() {
 		generateSkyIsland(tm, ix, iy)
 	}
 
-	// Surface features
+	// Surface features with enhanced variety
+	lastBuildingX := -50 // Track last building position for spacing
 	for x := 5; x < tm.Cols-5; x++ {
 		y := surfaceHeight[x]
 		if y <= 0 || y >= tm.Rows {
@@ -285,101 +360,141 @@ func (tm *Tilemap) GenerateTerrariaWorld() {
 
 		surfaceTile := tm.Grid[y][x]
 
-		// Trees
+		// Trees with more variety
 		if surfaceTile == ID_Grass {
 			chance := 0.0
 			switch biomes[x] {
 			case BiomePlains:
-				chance = 0.02
+				chance = 0.03 // Slightly more trees
 			case BiomeForest:
-				chance = 0.12
+				chance = 0.18 // Dense forests
 			case BiomeMountains:
-				chance = 0.005
+				chance = 0.008
 			}
 
 			if rand.Float64() < chance && tm.Grid[y-1][x] == 0 {
 				generateTree(tm, x, y)
-				x += 3 // Skip area after tree
-			} else if rand.Float64() < 0.05 {
-				// Flowers
+				x += 2 + rand.Intn(2) // Variable spacing
+			} else if rand.Float64() < 0.08 {
+				// Flowers and grass tufts
 				if y-1 >= 0 && tm.Grid[y-1][x] == 0 {
-					tm.Grid[y-1][x] = ID_Flower
+					if rand.Float64() < 0.6 {
+						tm.Grid[y-1][x] = ID_Flower
+					} else {
+						// Grass tuft (use leaves as grass)
+						tm.Grid[y-1][x] = ID_Leaves
+					}
 				}
 			}
 		}
 
-		// Cacti
-		if surfaceTile == ID_Sand && rand.Float64() < 0.025 && tm.Grid[y-1][x] == 0 {
-			generateCactus(tm, x, y)
-			x += 2
+		// Swamp decorations: mushrooms and dead trees
+		if biomes[x] == BiomeSwamp && surfaceTile == ID_Dirt {
+			if rand.Float64() < 0.06 && y-1 >= 0 && tm.Grid[y-1][x] == 0 {
+				tm.Grid[y-1][x] = ID_Mushroom
+			} else if rand.Float64() < 0.02 && y-1 >= 0 && tm.Grid[y-1][x] == 0 {
+				// Dead tree (just logs, no leaves)
+				height := 3 + rand.Intn(2)
+				for h := 1; h <= height; h++ {
+					if y-h >= 0 {
+						tm.Grid[y-h][x] = ID_Log
+					}
+				}
+				x += 2
+			}
 		}
 
-		// Rocks
-		if biomes[x] == BiomeMountains && rand.Float64() < 0.03 {
-			generateRockFormation(tm, x, y)
+		// Desert: cacti and dead bushes
+		if surfaceTile == ID_Sand {
+			if rand.Float64() < 0.035 && tm.Grid[y-1][x] == 0 {
+				generateCactus(tm, x, y)
+				x += 2
+			} else if rand.Float64() < 0.02 && y-1 >= 0 && tm.Grid[y-1][x] == 0 {
+				// Desert rock/boulder
+				tm.Grid[y-1][x] = ID_Stone
+			}
+		}
+
+		// Mountains: more rock formations and crystals
+		if biomes[x] == BiomeMountains {
+			if rand.Float64() < 0.05 {
+				generateRockFormation(tm, x, y)
+			}
+			if rand.Float64() < 0.01 && y-1 >= 0 && tm.Grid[y-1][x] == 0 {
+				tm.Grid[y-1][x] = ID_Crystal
+			}
+		}
+
+		// Decorative buildings (sparse, with spacing)
+		if x-lastBuildingX > 50 && rand.Float64() < 0.02 {
+			switch biomes[x] {
+			case BiomePlains, BiomeForest:
+				if surfaceTile == ID_Grass && y-6 >= 0 {
+					generateCottage(tm, x, y)
+					lastBuildingX = x
+					x += 10
+				}
+			case BiomeDesert:
+				if surfaceTile == ID_Sand && y-5 >= 0 {
+					generateDesertHut(tm, x, y)
+					lastBuildingX = x
+					x += 8
+				}
+			case BiomeMountains:
+				if y-7 >= 0 {
+					generateMountainCabin(tm, x, y)
+					lastBuildingX = x
+					x += 12
+				}
+			case BiomeSwamp:
+				if y-8 >= 0 {
+					generateSwampHut(tm, x, y)
+					lastBuildingX = x
+					x += 8
+				}
+			}
 		}
 	}
 
-	// Spawn house
-	spawnX := 100
-	bestX := spawnX
-	minVar := 1000.0
-	for x := spawnX - 20; x < spawnX+20 && x+10 < tm.Cols; x++ {
-		if x < 0 {
-			continue
-		}
-		v := math.Abs(float64(surfaceHeight[x] - surfaceHeight[x+10]))
-		if v < minVar {
-			minVar = v
-			bestX = x
-		}
-	}
-	generateHouse(tm, bestX, surfaceHeight[bestX])
+	// Generate mountain encounter chamber
+	generateMountainChamber(tm, surfaceHeight)
 
-	if tm.Cols > 250 {
-		numDungeons := 3 + rand.Intn(3)
-		for i := 0; i < numDungeons; i++ {
-			dungeonRange := tm.Cols - 200
-			if dungeonRange < 1 {
-				dungeonRange = 1
-			}
-			dx := 100 + rand.Intn(dungeonRange)
-			if dx >= tm.Cols {
-				dx = tm.Cols - 50
-			}
-			dy := surfaceHeight[dx] + 40 + rand.Intn(60)
-			if dy < tm.Rows-20 {
-				generateDungeon(tm, dx, dy)
-			}
-		}
-	}
+	// Place HP healing chests along path to chamber
+	placePathChests(tm, surfaceHeight)
 }
 
 func generateBiomeHeight(p *perlin.Perlin, x int, biome int) float64 {
-	baseHeight := 60.0
+	baseHeight := 55.0
 
 	switch biome {
 	case BiomePlains:
-		h1 := p.Noise1D(float64(x)*0.015) * 5.0
-		h2 := p.Noise1D(float64(x)*0.08+100) * 1.5
+		// Rolling gentle hills
+		h1 := p.Noise1D(float64(x)*0.01) * 3.0
+		h2 := p.Noise1D(float64(x)*0.05+100) * 1.0
 		return baseHeight + h1 + h2
 	case BiomeForest:
-		h1 := p.Noise1D(float64(x)*0.012) * 12.0
-		h2 := p.Noise1D(float64(x)*0.04+200) * 4.0
-		return baseHeight + h1 + h2 - 5
+		// Gentle hills with occasional rises
+		h1 := p.Noise1D(float64(x)*0.008) * 4.0
+		h2 := p.Noise1D(float64(x)*0.03+200) * 2.0
+		h3 := p.Noise1D(float64(x)*0.1+250) * 0.5
+		return baseHeight + h1 + h2 + h3 - 3
 	case BiomeMountains:
-		h1 := p.Noise1D(float64(x)*0.008) * 35.0
-		h2 := p.Noise1D(float64(x)*0.03+300) * 15.0
-		h3 := p.Noise1D(float64(x)*0.1+350) * 5.0 // Jagged detail
-		return baseHeight + h1 + h2 + h3 - 25
+		// Dramatic peaks and valleys
+		h1 := p.Noise1D(float64(x)*0.006) * 8.0
+		h2 := p.Noise1D(float64(x)*0.02+300) * 4.0
+		h3 := p.Noise1D(float64(x)*0.08+350) * 1.0
+		return baseHeight + h1 + h2 + h3 - 8
 	case BiomeDesert:
-		h1 := p.Noise1D(float64(x)*0.025) * 3.0
-		h2 := p.Noise1D(float64(x)*0.12+400) * 1.0 // Dunes
-		return baseHeight + h1 + h2 + 8
+		// Sand dunes - gentle waves
+		h1 := p.Noise1D(float64(x)*0.015) * 2.5
+		h2 := p.Noise1D(float64(x)*0.08+400) * 1.0
+		h3 := math.Sin(float64(x)*0.1) * 1.5 // Regular dune pattern
+		return baseHeight + h1 + h2 + h3 + 5
 	case BiomeSwamp:
-		h1 := p.Noise1D(float64(x)*0.02) * 4.0
-		h2 := p.Noise1D(float64(x)*0.06+500) * 1.5
-		return baseHeight + h1 + h2 - 12
+		// Low and flat with occasional bumps
+		h1 := p.Noise1D(float64(x)*0.012) * 2.0
+		h2 := p.Noise1D(float64(x)*0.04+500) * 1.0
+		return baseHeight + h1 + h2 - 8
 	}
 	return baseHeight
 }
@@ -425,7 +540,6 @@ func generateSmootherCave(tm *Tilemap, startX, startY int) {
 
 		radius := 2.0 + rand.Float64()*1.5
 
-		// Dig
 		ix := int(cx)
 		iy := int(cy)
 		r := int(radius)
@@ -435,6 +549,33 @@ func generateSmootherCave(tm *Tilemap, startX, startY int) {
 				if rx*rx+ry*ry <= r*r {
 					nx := ix + rx
 					ny := iy + ry
+					if nx > 0 && nx < tm.Cols-1 && ny > 0 && ny < tm.Rows-10 {
+						tm.Grid[ny][nx] = 0
+					}
+				}
+			}
+		}
+	}
+}
+
+// Generate a connecting tunnel between two points
+func generateTunnel(tm *Tilemap, x1, y1, x2, y2 int) {
+	steps := int(math.Max(math.Abs(float64(x2-x1)), math.Abs(float64(y2-y1))))
+	if steps == 0 {
+		return
+	}
+
+	for i := 0; i <= steps; i++ {
+		t := float64(i) / float64(steps)
+		x := int(float64(x1)*(1-t) + float64(x2)*t)
+		y := int(float64(y1)*(1-t) + float64(y2)*t)
+
+		// Carve a 2-tile radius tunnel
+		for rx := -2; rx <= 2; rx++ {
+			for ry := -2; ry <= 2; ry++ {
+				if rx*rx+ry*ry <= 4 {
+					nx := x + rx
+					ny := y + ry
 					if nx > 0 && nx < tm.Cols-1 && ny > 0 && ny < tm.Rows-10 {
 						tm.Grid[ny][nx] = 0
 					}
@@ -537,40 +678,6 @@ func generateCavern(tm *Tilemap, startX, startY int) {
 	}
 }
 
-func generateUndergroundLake(tm *Tilemap, startX, startY int) {
-	radius := 6 + rand.Intn(8)
-
-	// Dig the lake area
-	for rx := -radius; rx <= radius; rx++ {
-		for ry := -radius / 2; ry <= radius/2; ry++ {
-			distSq := float64(rx*rx)/float64(radius*radius) + float64(ry*ry)/float64((radius/2)*(radius/2))
-			if distSq <= 1.0 {
-				nx := startX + rx
-				ny := startY + ry
-				if nx > 0 && nx < tm.Cols-1 && ny > 0 && ny < tm.Rows-10 {
-					tm.Grid[ny][nx] = 0
-				}
-			}
-		}
-	}
-
-	// Fill bottom with water
-	for rx := -radius + 1; rx < radius; rx++ {
-		for ry := 0; ry <= radius/2; ry++ {
-			distSq := float64(rx*rx)/float64(radius*radius) + float64(ry*ry)/float64((radius/2)*(radius/2))
-			if distSq <= 0.9 {
-				nx := startX + rx
-				ny := startY + ry
-				if nx > 0 && nx < tm.Cols-1 && ny > 0 && ny < tm.Rows-10 {
-					if tm.Grid[ny][nx] == 0 {
-						tm.Grid[ny][nx] = ID_Water
-					}
-				}
-			}
-		}
-	}
-}
-
 func generateCactus(tm *Tilemap, x, rootY int) {
 	height := 2 + rand.Intn(3)
 	for h := 1; h <= height; h++ {
@@ -608,15 +715,297 @@ func generateRockFormation(tm *Tilemap, x, rootY int) {
 	}
 }
 
+// Decorative cottage for plains/forest biomes
+func generateCottage(tm *Tilemap, x, groundY int) {
+	width := 6 + rand.Intn(3)  // 6-8 wide
+	height := 4 + rand.Intn(2) // 4-5 tall
+
+	setTile := func(tx, ty, id int) {
+		if tx >= 0 && tx < tm.Cols && ty >= 0 && ty < tm.Rows {
+			tm.Grid[ty][tx] = id
+		}
+	}
+
+	// Foundation and walls (solid planks)
+	for hx := 0; hx < width; hx++ {
+		for hy := 0; hy < height; hy++ {
+			setTile(x+hx, groundY-1-hy, ID_Planks)
+		}
+	}
+
+	// Log corners for detail
+	for hy := 0; hy < height; hy++ {
+		setTile(x, groundY-1-hy, ID_Log)
+		setTile(x+width-1, groundY-1-hy, ID_Log)
+	}
+
+	// Pitched roof (logs)
+	roofBase := groundY - height
+	roofWidth := width + 2
+	roofStart := x - 1
+	for level := 0; level <= (roofWidth/2)+1; level++ {
+		for rx := level; rx < roofWidth-level; rx++ {
+			setTile(roofStart+rx, roofBase-level, ID_Log)
+		}
+		if level >= roofWidth/2 {
+			break
+		}
+	}
+
+	// Small window (decorative - just different tile)
+	windowX := x + width/2
+	windowY := groundY - height/2 - 1
+	if windowY >= 0 {
+		setTile(windowX, windowY, ID_Stone) // Stone as window frame
+	}
+}
+
+// Decorative hut for desert biome
+func generateDesertHut(tm *Tilemap, x, groundY int) {
+	width := 5 + rand.Intn(3)  // 5-7 wide
+	height := 3 + rand.Intn(2) // 3-4 tall
+
+	setTile := func(tx, ty, id int) {
+		if tx >= 0 && tx < tm.Cols && ty >= 0 && ty < tm.Rows {
+			tm.Grid[ty][tx] = id
+		}
+	}
+
+	// Sandstone walls (using stone with sand accents)
+	for hx := 0; hx < width; hx++ {
+		for hy := 0; hy < height; hy++ {
+			setTile(x+hx, groundY-1-hy, ID_Stone)
+		}
+	}
+
+	// Sand trim at top
+	for hx := 0; hx < width; hx++ {
+		setTile(x+hx, groundY-height, ID_Sand)
+	}
+
+	// Flat roof extends slightly
+	roofY := groundY - height - 1
+	for hx := -1; hx <= width; hx++ {
+		setTile(x+hx, roofY, ID_Stone)
+	}
+
+	// Decorative pot (stone block) beside hut
+	if rand.Float64() < 0.5 {
+		setTile(x-1, groundY-1, ID_Stone)
+	}
+}
+
+// Decorative cabin for mountain biome
+func generateMountainCabin(tm *Tilemap, x, groundY int) {
+	width := 7 + rand.Intn(3)  // 7-9 wide
+	height := 4 + rand.Intn(2) // 4-5 tall
+
+	setTile := func(tx, ty, id int) {
+		if tx >= 0 && tx < tm.Cols && ty >= 0 && ty < tm.Rows {
+			tm.Grid[ty][tx] = id
+		}
+	}
+
+	// Stone walls
+	for hx := 0; hx < width; hx++ {
+		for hy := 0; hy < height; hy++ {
+			setTile(x+hx, groundY-1-hy, ID_Stone)
+		}
+	}
+
+	// Dark stone corners
+	for hy := 0; hy < height; hy++ {
+		setTile(x, groundY-1-hy, ID_DarkStone)
+		setTile(x+width-1, groundY-1-hy, ID_DarkStone)
+	}
+
+	// Steep pitched roof (dark stone)
+	roofBase := groundY - height
+	for level := 0; level <= width/2+1; level++ {
+		for rx := level; rx < width-level; rx++ {
+			setTile(x+rx, roofBase-level, ID_DarkStone)
+		}
+		if level >= width/2 {
+			break
+		}
+	}
+
+	// Chimney
+	chimneyX := x + width - 2
+	chimneyTop := roofBase - width/2 - 1
+	for chy := chimneyTop; chy <= roofBase; chy++ {
+		setTile(chimneyX, chy, ID_Stone)
+	}
+}
+
+// Decorative stilted structure for swamp biome
+func generateSwampHut(tm *Tilemap, x, groundY int) {
+	width := 5 + rand.Intn(2)  // 5-6 wide
+	height := 3                // 3 tall cabin
+	stilts := 2 + rand.Intn(2) // 2-3 tall stilts
+
+	setTile := func(tx, ty, id int) {
+		if tx >= 0 && tx < tm.Cols && ty >= 0 && ty < tm.Rows {
+			tm.Grid[ty][tx] = id
+		}
+	}
+
+	// Stilts (logs)
+	floorY := groundY - stilts - 1
+	setTile(x, floorY+1, ID_Log)
+	setTile(x+width-1, floorY+1, ID_Log)
+	for sy := 0; sy < stilts; sy++ {
+		setTile(x, groundY-1-sy, ID_Log)
+		setTile(x+width-1, groundY-1-sy, ID_Log)
+	}
+
+	// Platform and walls (planks)
+	for hx := 0; hx < width; hx++ {
+		setTile(x+hx, floorY, ID_Planks) // floor
+		for hy := 1; hy <= height; hy++ {
+			setTile(x+hx, floorY-hy, ID_Planks)
+		}
+	}
+
+	// Simple flat roof
+	roofY := floorY - height - 1
+	for hx := -1; hx <= width; hx++ {
+		setTile(x+hx, roofY, ID_Log)
+	}
+}
+
+// Mountain encounter chamber - returns center X,Y for slime spawning
+var MountainChamberX, MountainChamberY float64
+
+func generateMountainChamber(tm *Tilemap, surfaceHeight []int) {
+	// Chamber location: x ~ 280-320 tiles (far from spawn at x~100)
+	chamberX := 300
+	if chamberX >= tm.Cols-40 {
+		chamberX = tm.Cols - 50
+	}
+
+	chamberWidth := 40 // 40 tiles wide arena
+
+	setTile := func(tx, ty, id int) {
+		if tx >= 0 && tx < tm.Cols && ty >= 0 && ty < tm.Rows {
+			tm.Grid[ty][tx] = id
+		}
+	}
+
+	// Flatten the ground in the chamber area
+	avgHeight := 0
+	for x := chamberX; x < chamberX+chamberWidth && x < tm.Cols; x++ {
+		avgHeight += surfaceHeight[x]
+	}
+	avgHeight /= chamberWidth
+
+	// Set chamber floor height
+	for x := chamberX; x < chamberX+chamberWidth && x < tm.Cols; x++ {
+		surfaceHeight[x] = avgHeight
+	}
+
+	// Clear the arena (air above ground)
+	arenaHeight := 12 // Clear 12 tiles high
+	for x := chamberX; x < chamberX+chamberWidth && x < tm.Cols; x++ {
+		groundY := avgHeight
+		// Set ground
+		setTile(x, groundY, ID_Stone)
+		// Clear above
+		for y := groundY - arenaHeight; y < groundY; y++ {
+			if y >= 0 {
+				setTile(x, y, 0) // Air
+			}
+		}
+		// Fill below with stone
+		for y := groundY + 1; y < tm.Rows-10; y++ {
+			setTile(x, y, ID_Stone)
+		}
+	}
+
+	// Enhanced arena walls with pillars
+	wallHeight := 15
+	pillarSpacing := 8
+
+	// Side walls
+	for y := avgHeight - wallHeight; y <= avgHeight; y++ {
+		if y >= 0 {
+			setTile(chamberX-1, y, ID_DarkStone)
+			setTile(chamberX-2, y, ID_DarkStone)
+			setTile(chamberX+chamberWidth, y, ID_DarkStone)
+			setTile(chamberX+chamberWidth+1, y, ID_DarkStone)
+		}
+	}
+
+	// Decorative pillars inside arena
+	for px := chamberX + pillarSpacing; px < chamberX+chamberWidth-pillarSpacing; px += pillarSpacing {
+		for py := avgHeight - 6; py < avgHeight; py++ {
+			setTile(px, py, ID_Stone)
+		}
+		// Crystal on top of pillars
+		setTile(px, avgHeight-7, ID_Crystal)
+	}
+
+	// Entrance ramps (gradual slopes at edges)
+	for i := 0; i < 4; i++ {
+		rampY := avgHeight - i
+		if rampY >= 0 {
+			setTile(chamberX-3-i, rampY, ID_Stone)
+			setTile(chamberX+chamberWidth+2+i, rampY, ID_Stone)
+		}
+	}
+
+	// Store chamber center for slime spawning (world coordinates)
+	MountainChamberX = float64((chamberX + chamberWidth/2) * tm.TileSize)
+	MountainChamberY = float64((avgHeight - 2) * tm.TileSize) // Slightly above ground
+}
+
+// Place HP healing chests along the path from spawn to mountain chamber
+func placePathChests(tm *Tilemap, surfaceHeight []int) {
+	// Place 6 chests between spawn (x~100) and chamber (x~300)
+	chestPositions := []int{115, 140, 170, 200, 235, 270}
+
+	for _, cx := range chestPositions {
+		if cx >= tm.Cols {
+			continue
+		}
+		groundY := surfaceHeight[cx]
+		chestY := groundY - 1 // One tile above ground
+
+		// Verify there's air above and it's on solid ground
+		if chestY >= 0 && chestY < tm.Rows && tm.Grid[chestY][cx] == 0 && tm.Grid[groundY][cx] != 0 {
+			tm.Grid[chestY][cx] = ID_Chest
+		}
+	}
+}
+
 func generateSkyIsland(tm *Tilemap, x, y int) {
-	width := 15 + rand.Intn(20)
-	height := 4 + rand.Intn(4)
+	// Varied island sizes
+	islandType := rand.Intn(3)
+	var width, height int
+
+	switch islandType {
+	case 0: // Small island
+		width = 10 + rand.Intn(8)
+		height = 3 + rand.Intn(2)
+	case 1: // Medium island
+		width = 18 + rand.Intn(12)
+		height = 4 + rand.Intn(3)
+	case 2: // Large island
+		width = 25 + rand.Intn(15)
+		height = 5 + rand.Intn(4)
+	}
+
+	setTile := func(tx, ty, id int) {
+		if tx >= 0 && tx < tm.Cols && ty >= 0 && ty < tm.Rows {
+			tm.Grid[ty][tx] = id
+		}
+	}
 
 	// Generate island shape using noise
 	for ix := 0; ix < width; ix++ {
-		// Parabolic depth
+		// Parabolic depth for natural shape
 		distFromCenter := math.Abs(float64(ix) - float64(width)/2)
-		maxDepth := height - int(distFromCenter*float64(height)/float64(width)*1.5)
+		maxDepth := height - int(distFromCenter*float64(height)/float64(width)*1.8)
 		if maxDepth < 1 {
 			maxDepth = 1
 		}
@@ -624,134 +1013,275 @@ func generateSkyIsland(tm *Tilemap, x, y int) {
 		for iy := 0; iy < maxDepth; iy++ {
 			nx := x + ix
 			ny := y + iy
-			if nx >= 0 && nx < tm.Cols && ny >= 0 && ny < tm.Rows {
-				if iy == 0 {
-					tm.Grid[ny][nx] = ID_SkyGrass
-				} else {
-					tm.Grid[ny][nx] = ID_Dirt
-				}
+			if iy == 0 {
+				setTile(nx, ny, ID_SkyGrass)
+			} else if iy == maxDepth-1 && rand.Float64() < 0.3 {
+				// Occasional mossy stone underneath
+				setTile(nx, ny, ID_MossyStone)
+			} else {
+				setTile(nx, ny, ID_Dirt)
+			}
+		}
+
+		// Hanging vines/crystals underneath some islands
+		if rand.Float64() < 0.15 && maxDepth > 1 {
+			vineLength := 2 + rand.Intn(3)
+			for v := 0; v < vineLength; v++ {
+				setTile(x+ix, y+maxDepth+v, ID_Leaves)
 			}
 		}
 	}
 
-	// Add a tree or chest on top
+	// Add decorations on top
 	centerX := x + width/2
-	if centerX >= 0 && centerX < tm.Cols && y-1 >= 0 {
-		if rand.Float64() < 0.5 {
-			generateTree(tm, centerX, y)
-		} else {
-			tm.Grid[y-1][centerX] = ID_Chest
+
+	// Trees (more on larger islands)
+	numTrees := 1
+	if islandType >= 1 {
+		numTrees = 2 + rand.Intn(2)
+	}
+
+	for t := 0; t < numTrees; t++ {
+		treeX := x + 3 + rand.Intn(width-6)
+		if treeX >= 0 && treeX < tm.Cols && y-1 >= 0 {
+			if tm.Grid[y][treeX] == ID_SkyGrass {
+				generateTree(tm, treeX, y)
+			}
+		}
+	}
+
+	// Chest on medium/large islands
+	if islandType >= 1 && centerX >= 0 && centerX < tm.Cols && y-1 >= 0 {
+		setTile(centerX, y-1, ID_Chest)
+	}
+
+	// Flowers scattered on top
+	for fx := x + 1; fx < x+width-1; fx++ {
+		if rand.Float64() < 0.15 && fx >= 0 && fx < tm.Cols && y-1 >= 0 {
+			if tm.Grid[y][fx] == ID_SkyGrass && tm.Grid[y-1][fx] == 0 {
+				setTile(fx, y-1, ID_Flower)
+			}
+		}
+	}
+
+	// Floating crystal near some islands
+	if rand.Float64() < 0.4 {
+		crystalX := x + width + 3
+		crystalY := y - 2 + rand.Intn(4)
+		if crystalX < tm.Cols && crystalY >= 0 {
+			setTile(crystalX, crystalY, ID_Crystal)
 		}
 	}
 }
 
 func generateHouse(tm *Tilemap, x, floorY int) {
-	width := 14
-	height := 8
+	width := 16
+	mainHeight := 6
+	basementDepth := 5
 
-	// Foundation
-	for hx := x; hx < x+width && hx < tm.Cols; hx++ {
-		if floorY >= 0 && floorY < tm.Rows && hx >= 0 {
-			tm.Grid[floorY][hx] = ID_Stone // Stone foundation
+	// Helper to safely set tile
+	setTile := func(tx, ty, id int) {
+		if tx >= 0 && tx < tm.Cols && ty >= 0 && ty < tm.Rows {
+			tm.Grid[ty][tx] = id
 		}
 	}
+	getTile := func(tx, ty int) int {
+		if tx >= 0 && tx < tm.Cols && ty >= 0 && ty < tm.Rows {
+			return tm.Grid[ty][tx]
+		}
+		return 0
+	}
 
-	// Walls
-	for hx := x; hx < x+width && hx < tm.Cols; hx++ {
-		for hy := floorY - height; hy < floorY && hy < tm.Rows; hy++ {
-			if hx >= 0 && hy >= 0 {
-				isLeftWall := hx == x
-				isRightWall := hx == x+width-1
-				isCeiling := hy == floorY-height
+	// Ground level is floorY (the grass/surface tile)
+	// Interior floor will be at floorY (same level as outside ground)
 
-				if isLeftWall || isRightWall || isCeiling {
-					tm.Grid[hy][hx] = ID_Planks
-				} else {
-					tm.Grid[hy][hx] = 0 // Clear interior
+	// Clear terrain around house first
+	for hx := x - 3; hx < x+width+5; hx++ {
+		for hy := floorY - mainHeight - 8; hy <= floorY+basementDepth+1; hy++ {
+			// Clear trees/leaves above ground level
+			if hy < floorY {
+				tile := getTile(hx, hy)
+				if tile == ID_Log || tile == ID_Leaves {
+					setTile(hx, hy, 0)
 				}
 			}
 		}
 	}
 
-	// Roof
-	roofTop := floorY - height
-	roofWidth := width + 4 // Overhang
-	roofStartX := x - 2
-	roofHeight := 5
+	// ===== FOUNDATION =====
+	// Solid stone foundation under the house
+	for hx := x; hx < x+width; hx++ {
+		setTile(hx, floorY, ID_Stone)
+		setTile(hx, floorY+1, ID_Stone)
+	}
 
-	for level := 0; level < roofHeight; level++ {
-		roofY := roofTop - 1 - level
-		leftX := roofStartX + level
-		rightX := roofStartX + roofWidth - 1 - level
+	// ===== BASEMENT =====
+	basementFloorY := floorY + basementDepth
+	for hx := x; hx < x+width; hx++ {
+		for hy := floorY + 2; hy <= basementFloorY; hy++ {
+			isLeftWall := hx == x
+			isRightWall := hx == x+width-1
+			isFloor := hy == basementFloorY
 
-		if roofY >= 0 && roofY < tm.Rows {
-			for rx := leftX; rx <= rightX && rx < tm.Cols; rx++ {
-				if rx >= 0 {
-					if rx == leftX || rx == rightX || level == roofHeight-1 {
-						tm.Grid[roofY][rx] = ID_Log // Roof edge
-					}
-				}
+			if isLeftWall || isRightWall || isFloor {
+				setTile(hx, hy, ID_Stone)
+			} else {
+				setTile(hx, hy, 0) // Clear interior
 			}
 		}
 	}
 
-	// Door
-	doorX := x + 2
-	if doorX < tm.Cols && doorX >= 0 {
-		if floorY-1 >= 0 {
-			tm.Grid[floorY-1][doorX] = 0
-		}
-		if floorY-2 >= 0 {
-			tm.Grid[floorY-2][doorX] = 0
-		}
-		// Door frame
-		if floorY-3 >= 0 {
-			tm.Grid[floorY-3][doorX] = ID_Log
+	// Basement stairs (right side, actual walkable stairs)
+	stairX := x + width - 4
+	for i := 0; i < basementDepth-1; i++ {
+		stairY := floorY + 1 + i
+		// Each stair step
+		setTile(stairX-i, stairY, ID_Stone)
+		// Clear above stairs
+		for clearY := floorY + 1; clearY < stairY; clearY++ {
+			setTile(stairX-i, clearY, 0)
 		}
 	}
 
-	// Windows
-	windowX := x + width - 4
-	windowY := floorY - 4
-	for wx := 0; wx < 2; wx++ {
-		for wy := 0; wy < 2; wy++ {
-			winX := windowX + wx
-			winY := windowY + wy
-			if winX >= 0 && winX < tm.Cols && winY >= 0 && winY < tm.Rows {
-				tm.Grid[winY][winX] = 0 // Window opening
+	// Basement chests
+	setTile(x+2, basementFloorY-1, ID_Chest)
+	setTile(x+4, basementFloorY-1, ID_Chest)
+
+	// Basement light
+	setTile(x+1, basementFloorY-2, ID_Furnace)
+
+	// ===== MAIN FLOOR WALLS =====
+	mainCeiling := floorY - mainHeight
+	for hx := x; hx < x+width; hx++ {
+		for hy := mainCeiling; hy < floorY; hy++ {
+			isLeftWall := hx == x
+			isRightWall := hx == x+width-1
+			isCeiling := hy == mainCeiling
+
+			if isLeftWall || isRightWall || isCeiling {
+				setTile(hx, hy, ID_Planks)
+			} else {
+				setTile(hx, hy, 0) // Clear interior
 			}
 		}
 	}
 
-	// Interior
-	// Furnace
-	if floorY-1 >= 0 && x+width-2 >= 0 && x+width-2 < tm.Cols {
-		tm.Grid[floorY-1][x+width-2] = ID_Furnace
-	}
+	// ===== DOOR =====
+	// Door at ground level (floorY is ground, so door opens at floorY-1, floorY-2, floorY-3)
+	doorX := x + 4
+	// Clear door opening (3 high)
+	setTile(doorX, floorY-1, 0)
+	setTile(doorX, floorY-2, 0)
+	setTile(doorX, floorY-3, 0)
+	setTile(doorX+1, floorY-1, 0)
+	setTile(doorX+1, floorY-2, 0)
+	setTile(doorX+1, floorY-3, 0)
 
-	// Chest
-	if floorY-1 >= 0 && x+width/2 >= 0 && x+width/2 < tm.Cols {
-		tm.Grid[floorY-1][x+width/2] = ID_Chest
-	}
+	// Door frame
+	setTile(doorX-1, floorY-1, ID_Log)
+	setTile(doorX-1, floorY-2, ID_Log)
+	setTile(doorX-1, floorY-3, ID_Log)
+	setTile(doorX+2, floorY-1, ID_Log)
+	setTile(doorX+2, floorY-2, ID_Log)
+	setTile(doorX+2, floorY-3, ID_Log)
+	// Top of door frame
+	setTile(doorX, floorY-4, ID_Log)
+	setTile(doorX+1, floorY-4, ID_Log)
+
+	// Clear foundation under door for entry
+	setTile(doorX, floorY, 0)
+	setTile(doorX+1, floorY, 0)
+
+	// ===== WINDOWS =====
+	windowY := floorY - 3
+	// Left window
+	setTile(x+1, windowY, 0)
+	setTile(x+1, windowY-1, 0)
+	// Right window
+	setTile(x+width-2, windowY, 0)
+	setTile(x+width-2, windowY-1, 0)
+
+	// ===== INTERIOR FURNITURE =====
+	// Fireplace (back right)
+	setTile(x+width-3, floorY-1, ID_Furnace)
+	setTile(x+width-3, floorY-2, ID_Stone)
+	setTile(x+width-3, floorY-3, ID_Stone)
 
 	// Table
-	tableX := x + 4
-	if floorY-1 >= 0 && tableX >= 0 && tableX < tm.Cols {
-		tm.Grid[floorY-1][tableX] = ID_Planks
-	}
-	if floorY-1 >= 0 && tableX+1 >= 0 && tableX+1 < tm.Cols {
-		tm.Grid[floorY-1][tableX+1] = ID_Planks
-	}
+	setTile(x+7, floorY-1, ID_Planks)
+	setTile(x+8, floorY-1, ID_Planks)
 
-	// Chimney
-	chimneyX := x + width - 3
-	chimneyBase := floorY - height - 3
-	for cy := 0; cy < 4; cy++ {
-		chimneyY := chimneyBase - cy
-		if chimneyY >= 0 && chimneyY < tm.Rows && chimneyX >= 0 && chimneyX < tm.Cols {
-			tm.Grid[chimneyY][chimneyX] = ID_Stone
+	// Chest
+	setTile(x+2, floorY-1, ID_Chest)
+
+	// Shelf
+	setTile(x+1, floorY-2, ID_Planks)
+
+	// ===== ROOF =====
+	// Proper triangular roof - filled solid with hollow attic
+	roofBaseY := mainCeiling - 1
+	roofPeakHeight := 5
+	roofOverhang := 2
+
+	for level := 0; level <= roofPeakHeight; level++ {
+		roofY := roofBaseY - level
+		// Calculate width at this level
+		leftX := x - roofOverhang + level
+		rightX := x + width - 1 + roofOverhang - level
+
+		if leftX > rightX {
+			break
+		}
+
+		for rx := leftX; rx <= rightX; rx++ {
+			if level == 0 {
+				// Bottom row of roof - solid
+				setTile(rx, roofY, ID_Log)
+			} else if rx == leftX || rx == rightX {
+				// Edges of roof
+				setTile(rx, roofY, ID_Log)
+			} else if leftX+1 >= rightX {
+				// Peak
+				setTile(rx, roofY, ID_Log)
+			} else {
+				// Interior - clear for attic
+				setTile(rx, roofY, 0)
+			}
 		}
 	}
+
+	// ===== CHIMNEY =====
+	chimneyX := x + width - 3
+	chimneyBaseY := roofBaseY - roofPeakHeight
+	for cy := roofBaseY; cy >= chimneyBaseY-2; cy-- {
+		setTile(chimneyX, cy, ID_Stone)
+	}
+
+	// ===== FRONT PATH =====
+	// Stone path leading to door
+	for px := doorX - 3; px < doorX; px++ {
+		setTile(px, floorY, ID_Stone)
+	}
+
+	// ===== GARDEN =====
+	gardenX := x + width + 1
+	for gx := gardenX; gx < gardenX+3 && gx < tm.Cols; gx++ {
+		// Keep existing ground tile, just add flowers on top
+		if rand.Float64() < 0.6 {
+			setTile(gx, floorY-1, ID_Flower)
+		}
+	}
+
+	// ===== FENCE =====
+	// Simple fence around property
+	fenceLeft := x - 2
+	fenceRight := x + width + 4
+	// Left fence post
+	setTile(fenceLeft, floorY-1, ID_Log)
+	setTile(fenceLeft, floorY-2, ID_Log)
+	// Right fence post
+	setTile(fenceRight, floorY-1, ID_Log)
+	setTile(fenceRight, floorY-2, ID_Log)
 }
 
 func generateDungeon(tm *Tilemap, x, y int) {

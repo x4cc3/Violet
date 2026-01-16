@@ -173,11 +173,13 @@ func (m *Monster) Update(g *Game) {
 					m.FacingRight = false
 				}
 
-				if !IsEmbedded() && dist < 300 && g.sounds != nil && g.sounds["slime"] != nil {
-					if !g.sounds["slime"].IsPlaying() {
+				if dist < 300 {
+					g.soundMutex.RLock()
+					if g.sounds != nil && g.sounds["slime"] != nil {
 						g.sounds["slime"].Rewind()
 						g.sounds["slime"].Play()
 					}
+					g.soundMutex.RUnlock()
 				}
 			}
 		}
@@ -215,6 +217,15 @@ func (m *Monster) getMonsterBodyHitbox() image.Rectangle {
 	y1 := int(m.Y) + MonsterBodyHitboxPaddingY
 	x2 := int(m.X) + m.FrameWidth - MonsterBodyHitboxPaddingX
 	y2 := int(m.Y) + m.FrameHeight
+
+	// Validate to prevent inverted hitboxes
+	if x1 > x2 {
+		x1 = x2
+	}
+	if y1 > y2 {
+		y1 = y2
+	}
+
 	return image.Rect(x1, y1, x2, y2)
 }
 
@@ -329,8 +340,11 @@ func (m *Monster) Draw(screen *ebiten.Image, cameraX, cameraY float64) {
 	sx := m.CurrentFrame * m.FrameWidth
 	sy := 0
 
-	if sx+m.FrameWidth <= m.CurrentSheet.Bounds().Dx() {
-		rect := image.Rect(sx, sy, sx+m.FrameWidth, sy+m.FrameHeight)
-		screen.DrawImage(m.CurrentSheet.SubImage(rect).(*ebiten.Image), monsterDrawOpts)
+	// Bounds check
+	if sx < 0 || sy < 0 || sx+m.FrameWidth > m.CurrentSheet.Bounds().Dx() || sy+m.FrameHeight > m.CurrentSheet.Bounds().Dy() {
+		return
 	}
+
+	rect := image.Rect(sx, sy, sx+m.FrameWidth, sy+m.FrameHeight)
+	screen.DrawImage(m.CurrentSheet.SubImage(rect).(*ebiten.Image), monsterDrawOpts)
 }
